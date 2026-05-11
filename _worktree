@@ -1,0 +1,49 @@
+#compdef worktree
+
+_worktree() {
+  local state line context
+
+  _arguments \
+    '1: :->command' \
+    '*: :->args' \
+    && return 0
+
+  case $state in
+    command)
+      _values 'worktree commands' \
+        'new[Create a new worktree and launch an agent session]' \
+        'destroy[Remove worktree and clean up]' \
+        'open[Reopen a worktree and resume its agent session]'
+      ;;
+    args)
+      case $line[1] in
+        new)
+          _arguments \
+            '--agent[Coding agent to launch]:agent:(claude codex)' \
+            '--model[Model to pass through to the agent]:model:' \
+            '*:feature description:'
+          ;;
+        open)
+          _arguments \
+            '--agent[Coding agent to launch]:agent:(claude codex)' \
+            '--model[Model to pass through to the agent]:model:' \
+            '*:worktree directory:_worktree_directories'
+          ;;
+        destroy)
+          _worktree_directories
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_worktree_directories() {
+  local worktrees_dir="./worktrees"
+
+  if [[ -d "$worktrees_dir" ]]; then
+    local directories=($(ls -1 "$worktrees_dir" 2>/dev/null))
+    _describe 'worktree directories' directories
+  fi
+}
+
+_worktree "$@"

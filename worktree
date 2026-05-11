@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+WORKTREES_DIR="./worktrees"
+DEFAULT_AGENT="${WORKTREE_AGENT:-claude}"
+
+function main() {
+  if [[ $# -eq 0 ]]; then
+    usage
+    exit 1
+  fi
+
+  case "$1" in
+  new)
+    shift
+    local model="" agent=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+      --model)
+        [[ $# -lt 2 ]] && die "--model requires a value"
+        model="$2"
+        shift 2
+        ;;
+      --model=*)
+        model="${1#--model=}"
+        shift
+        ;;
+      --agent)
+        [[ $# -lt 2 ]] && die "--agent requires a value"
+        agent="$2"
+        shift 2
+        ;;
+      --agent=*)
+        agent="${1#--agent=}"
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        die "Unknown option for 'new': $1"
+        ;;
+      *)
+        break
+        ;;
+      esac
+    done
+    [[ $# -lt 1 ]] && die "'new' command requires a feature description"
+    local feature_description="$1"
+    shift
+    local prompt="$*"
+    agent="$(resolve_agent "$agent")" || exit
+    create_worktree "$feature_description" "$prompt" "$model" "$agent"
+    ;;
+  destroy)
+    if [[ $# -lt 2 ]]; then
+      die "'destroy' command requires a worktree directory name"
+    fi
+    destroy_worktree "$2"
+    ;;
+  open)
+    shift
+    local model="" agent=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+      --model)
+        [[ $# -lt 2 ]] && die "--model requires a value"
+        model="$2"
+        shift 2
+        ;;
+      --model=*)
+        model="${1#--model=}"
+        shift
+        ;;
+      --agent)
+        [[ $# -lt 2 ]] && die "--agent requires a value"
+        agent="$2"
+        shift 2
+        ;;
+      --agent=*)
+        agent="${1#--agent=}"
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        die "Unknown option for 'open': $1"
+        ;;
+      *)
+        break
+        ;;
+      esac
+    done
+    [[ $# -lt 1 ]] && die "'open' command requires a worktree directory name"
+    agent="$(resolve_agent "$agent")" || exit
+    open_worktree "$1" "$model" "$agent"
+    ;;
+  -h | --help)
+    usage
+    ;;
+  *)
+    die "Unknown command: $1"
+    ;;
+  esac
+}
+
+usage() {
+  cat <<EOF
+Usage: worktree COMMAND [OPTIONS]
+
+Commands:
+  new [--agent AGENT] [--model MODEL] "feature description" ["prompt"]
+                              Create a new worktree and launch an agent session
+  destroy DIRECTORY           Remove worktree and clean up
+  open [--agent AGENT] [--model MODEL] DIRECTORY
+                              Reopen a worktree and resume its agent session
+
+Options:
+  --agent AGENT               Coding agent to launch: claude (default) or codex.
+                              Falls back to \$WORKTREE_AGENT if set.
+  --model MODEL               Pass --model MODEL through to the spawned agent
+                              (e.g. opus, sonnet, gpt-5.4, or a full model id)
+
+Examples:
+  worktree new "Add user authentication"
+  worktree new "Add user authentication" "Help me implement user auth with JWT tokens"
+  worktree new --model opus "Refactor parser core"
+  worktree new --agent codex "Port the CLI to Rust"
+  worktree destroy 25-01-add-user-authentication
+  worktree open 25-01-add-user-authentication
+  worktree open --agent codex --model gpt-5.4 25-01-add-user-authentication
+
+EOF
+}
+
+die() {
+  local message=$1
+  local code=${2:-1}
+  echo "Error: $message" >&2
+  exit "$code"
+}
+
+resolve_agent() {
+  local agent="${1:-$DEFAULT_AGENT}"
+  case "$agent" in
+  claude | codex) ;;
+  *) die "Unknown agent: $agent (expected 'claude' or 'codex')" ;;
+  esac
+  command -v "$agent" >/dev/null 2>&1 || die "'$agent' not found on PATH"
+  printf '%s' "$agent"
+}
+
+# Builds the shell command that launches an agent in a tmux pane.
+# Args: agent, mode (new|resume), name, model, prompt
+agent_command() {
+  local agent="$1" mode="$2" name="$3" model="$4" prompt="${5:-}"
+  local cmd
+  case "$agent" in
+  claude)
+    if [[ "$mode" == resume ]]; then
+      printf -v cmd 'claude -r %q' "$name"
+    else
+      printf -v cmd 'claude -n %q' "$name"
+    fi
+    [[ -n "$model" ]] && printf -v cmd '%s --model %q' "$cmd" "$model"
+    ;;
+  codex)
+    cmd='codex'
+    [[ -n "$model" ]] && printf -v cmd '%s --model %q' "$cmd" "$model"
+    # codex has no named sessions; resume picks up the most recent one.
+    [[ "$mode" == resume ]] && cmd="$cmd resume --last"
+    ;;
+  esac
+  [[ -n "$prompt" ]] && printf -v cmd '%s %q' "$cmd" "$prompt"
+  printf '%s' "$cmd"
+}
+
+ensure_worktrees_window() {
+  if ! tmux has-session 2>/dev/null; then
+    tmux new-session -d -s main
+  fi
+  if ! tmux list-windows -F "#{window_name}" | grep -q "^worktrees$"; then
+    tmux new-window -n "worktrees"
+  fi
+}
+
+launch_in_pane() {
+  local worktree_path="$1" pane_title="$2" launch_cmd="$3"
+  ensure_worktrees_window
+  tmux split-window -t "worktrees" -c "$worktree_path"
+  tmux send-keys -t "worktrees" "$launch_cmd" Enter
+  tmux select-layout -t "worktrees" tiled
+  tmux select-pane -t "worktrees" -T "$pane_title"
+  tmux select-window -t "worktrees"
+}
+
+create_worktree() {
+  local feature_description="$1"
+  local prompt="$2"
+  local model="${3:-}"
+  local agent="${4:-claude}"
+
+  if [[ ! -d "$WORKTREES_DIR" ]]; then
+    die "Worktrees directory does not exist in current directory: $WORKTREES_DIR"
+  fi
+
+  local text=${feature_description// /-}
+  text=$(echo "$text" | tr '[:upper:]' '[:lower:]')
+  local date
+  date=$(date +"%y-%m")
+  local branch_name="$date-$text"
+
+  local worktree_path="$WORKTREES_DIR/$branch_name"
+
+  if [[ -d "$worktree_path" ]]; then
+    die "Worktree already exists: $worktree_path"
+  fi
+
+  git worktree add "$worktree_path" -b "$branch_name"
+
+  local main_claude_dir
+  main_claude_dir="$(git rev-parse --show-toplevel)/.claude"
+  if [[ -d "$main_claude_dir" ]]; then
+    # Symlink only settings.local.json — tracked .claude/ contents (rules, skills)
+    # are already checked out by git. Symlinking the whole dir would nest inside
+    # the existing .claude/ as .claude/.claude and show up as untracked.
+    ln -sf "$main_claude_dir/settings.local.json" "$worktree_path/.claude/settings.local.json"
+  fi
+
+  launch_in_pane "$worktree_path" "$branch_name" \
+    "$(agent_command "$agent" new "$branch_name" "$model" "$prompt")"
+}
+
+destroy_worktree() {
+  local directory_name="$1"
+  local worktree_path="$WORKTREES_DIR/$directory_name"
+  local pane_count
+
+  if [[ ! -d "$worktree_path" ]]; then
+    die "Worktree does not exist: $worktree_path"
+  fi
+
+  if tmux has-session 2>/dev/null && tmux list-windows -F "#{window_name}" | grep -q "^worktrees$"; then
+    pane_count=$(tmux list-panes -t "worktrees" | wc -l)
+    if [[ $pane_count -eq 1 ]]; then
+      tmux kill-window -t "worktrees"
+    fi
+  fi
+
+  git worktree remove "$worktree_path"
+}
+
+open_worktree() {
+  local directory_name="$1"
+  local model="${2:-}"
+  local agent="${3:-claude}"
+  local worktree_path="$WORKTREES_DIR/$directory_name"
+
+  if [[ ! -d "$worktree_path" ]]; then
+    die "Worktree does not exist: $worktree_path"
+  fi
+
+  launch_in_pane "$worktree_path" "$directory_name" \
+    "$(agent_command "$agent" resume "$directory_name" "$model")"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
