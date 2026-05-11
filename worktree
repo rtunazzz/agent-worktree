@@ -179,19 +179,24 @@ agent_command() {
   printf '%s' "$cmd"
 }
 
-ensure_worktrees_window() {
+launch_in_pane() {
+  local worktree_path="$1" pane_title="$2" launch_cmd="$3"
+
   if ! tmux has-session 2>/dev/null; then
     tmux new-session -d -s main
   fi
-  if ! tmux list-windows -F "#{window_name}" | grep -q "^worktrees$"; then
-    tmux new-window -n "worktrees"
-  fi
-}
 
-launch_in_pane() {
-  local worktree_path="$1" pane_title="$2" launch_cmd="$3"
-  ensure_worktrees_window
-  tmux split-window -t "worktrees" -c "$worktree_path"
+  # tmux new-window always spawns its window with one shell pane, so when we
+  # have to create the "worktrees" window we launch the agent into that initial
+  # pane directly. Only when the window already exists do we split off a new
+  # pane — otherwise we'd leave the throwaway shell pane sitting next to the
+  # agent (the bug: a fresh "worktrees" window started with two panes, one empty).
+  if tmux list-windows -F "#{window_name}" | grep -q "^worktrees$"; then
+    tmux split-window -t "worktrees" -c "$worktree_path"
+  else
+    tmux new-window -n "worktrees" -c "$worktree_path"
+  fi
+
   tmux send-keys -t "worktrees" "$launch_cmd" Enter
   tmux select-layout -t "worktrees" tiled
   tmux select-pane -t "worktrees" -T "$pane_title"
