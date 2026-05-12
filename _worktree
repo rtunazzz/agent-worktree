@@ -21,12 +21,14 @@ _worktree() {
           _arguments \
             '--agent[Coding agent to launch]:agent:(claude codex)' \
             '--model[Model to pass through to the agent]:model:' \
+            '--settings[Settings file to pass through to the agent (claude only)]:settings file:_files' \
             '*:feature description:'
           ;;
         open)
           _arguments \
             '--agent[Coding agent to launch]:agent:(claude codex)' \
             '--model[Model to pass through to the agent]:model:' \
+            '--settings[Settings file to pass through to the agent (claude only)]:settings file:_files' \
             '*:worktree directory:_worktree_directories'
           ;;
         destroy)
