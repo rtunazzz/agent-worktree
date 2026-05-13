@@ -203,6 +203,25 @@ agent_command() {
   printf '%s' "$cmd"
 }
 
+# Pre-trust a worktree dir in ~/.claude.json. An interactive `claude` session
+# only applies project settings and --settings (incl. hooks like the review
+# gate) once the workspace is trusted; the trust dialog is shown only in
+# interactive mode, so an unattended pane would otherwise leave it untrusted
+# and those hooks would silently never load. No-op without jq.
+claude_trust_dir() {
+  local dir cfg tmp
+  command -v jq >/dev/null 2>&1 || return 0
+  dir="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  cfg="$HOME/.claude.json"
+  [[ -f "$cfg" ]] || echo '{}' >"$cfg"
+  tmp="$(mktemp)" || return 0
+  if jq --arg d "$dir" '.projects //= {} | .projects[$d] = ((.projects[$d] // {}) + {hasTrustDialogAccepted: true})' "$cfg" >"$tmp" 2>/dev/null; then
+    mv "$tmp" "$cfg"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 launch_in_pane() {
   local worktree_path="$1" pane_title="$2" launch_cmd="$3"
 
@@ -261,6 +280,8 @@ create_worktree() {
     ln -sf "$main_claude_dir/settings.local.json" "$worktree_path/.claude/settings.local.json"
   fi
 
+  [[ "$agent" == claude ]] && claude_trust_dir "$worktree_path"
+
   launch_in_pane "$worktree_path" "$branch_name" \
     "$(agent_command "$agent" new "$branch_name" "$model" "$prompt" "$settings")"
 }
@@ -294,6 +315,8 @@ open_worktree() {
   if [[ ! -d "$worktree_path" ]]; then
     die "Worktree does not exist: $worktree_path"
   fi
+
+  [[ "$agent" == claude ]] && claude_trust_dir "$worktree_path"
 
   launch_in_pane "$worktree_path" "$directory_name" \
     "$(agent_command "$agent" resume "$directory_name" "$model" "" "$settings")"
