@@ -152,9 +152,9 @@ Examples:
   worktree new --model opus "Refactor parser core"
   worktree new --agent codex "Port the CLI to Rust"
   worktree new --settings ~/.config/agent-worktree/hooks.json "Add caching layer"
-  worktree destroy 25-01-add-user-authentication
-  worktree open 25-01-add-user-authentication
-  worktree open --agent codex --model gpt-5.4 25-01-add-user-authentication
+  worktree destroy add-user-authentication
+  worktree open add-user-authentication
+  worktree open --agent codex --model gpt-5.4 add-user-authentication
 
 EOF
 }
@@ -259,9 +259,7 @@ create_worktree() {
 
   local text=${feature_description// /-}
   text=$(echo "$text" | tr '[:upper:]' '[:lower:]')
-  local date
-  date=$(date +"%y-%m")
-  local branch_name="$date-$text"
+  local branch_name="$text"
 
   local worktree_path="$WORKTREES_DIR/$branch_name"
 
