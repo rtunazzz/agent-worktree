@@ -243,7 +243,6 @@ launch_in_pane() {
   tmux send-keys -t "worktrees" "$launch_cmd" Enter
   tmux select-layout -t "worktrees" tiled
   tmux select-pane -t "worktrees" -T "$pane_title"
-  tmux select-window -t "worktrees"
 }
 
 create_worktree() {
