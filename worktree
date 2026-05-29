@@ -14,7 +14,7 @@ function main() {
   case "$1" in
   new)
     shift
-    local model="" agent="" settings=""
+    local model="" agent="" settings="" effort=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
       --model)
@@ -24,6 +24,15 @@ function main() {
         ;;
       --model=*)
         model="${1#--model=}"
+        shift
+        ;;
+      --effort)
+        [[ $# -lt 2 ]] && die "--effort requires a value"
+        effort="$2"
+        shift 2
+        ;;
+      --effort=*)
+        effort="${1#--effort=}"
         shift
         ;;
       --agent)
@@ -61,7 +70,8 @@ function main() {
     shift
     local prompt="$*"
     agent="$(resolve_agent "$agent")" || exit
-    create_worktree "$feature_description" "$prompt" "$model" "$agent" "$settings"
+    resolve_effort "$effort" "$agent" || exit
+    create_worktree "$feature_description" "$prompt" "$model" "$agent" "$settings" "$effort"
     ;;
   destroy)
     if [[ $# -lt 2 ]]; then
@@ -71,7 +81,7 @@ function main() {
     ;;
   open)
     shift
-    local model="" agent="" settings=""
+    local model="" agent="" settings="" effort=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
       --model)
@@ -81,6 +91,15 @@ function main() {
         ;;
       --model=*)
         model="${1#--model=}"
+        shift
+        ;;
+      --effort)
+        [[ $# -lt 2 ]] && die "--effort requires a value"
+        effort="$2"
+        shift 2
+        ;;
+      --effort=*)
+        effort="${1#--effort=}"
         shift
         ;;
       --agent)
@@ -115,7 +134,8 @@ function main() {
     done
     [[ $# -lt 1 ]] && die "'open' command requires a worktree directory name"
     agent="$(resolve_agent "$agent")" || exit
-    open_worktree "$1" "$model" "$agent" "$settings"
+    resolve_effort "$effort" "$agent" || exit
+    open_worktree "$1" "$model" "$agent" "$settings" "$effort"
     ;;
   -h | --help)
     usage
@@ -131,10 +151,10 @@ usage() {
 Usage: worktree COMMAND [OPTIONS]
 
 Commands:
-  new [--agent AGENT] [--model MODEL] [--settings FILE] "feature description" ["prompt"]
+  new [--agent AGENT] [--model MODEL] [--effort LEVEL] [--settings FILE] "feature description" ["prompt"]
                               Create a new worktree and launch an agent session
   destroy DIRECTORY           Remove worktree and clean up
-  open [--agent AGENT] [--model MODEL] [--settings FILE] DIRECTORY
+  open [--agent AGENT] [--model MODEL] [--effort LEVEL] [--settings FILE] DIRECTORY
                               Reopen a worktree and resume its agent session
 
 Options:
@@ -142,6 +162,10 @@ Options:
                               Falls back to \$WORKTREE_AGENT if set.
   --model MODEL               Pass --model MODEL through to the spawned agent
                               (e.g. opus, sonnet, gpt-5.4, or a full model id)
+  --effort LEVEL              Reasoning/effort level for the session. Sent as
+                              --effort to claude (low, medium, high, xhigh, max)
+                              or -c model_reasoning_effort to codex (none,
+                              minimal, low, medium, high, xhigh).
   --settings FILE             Pass --settings FILE through to the spawned agent
                               (claude only — extra settings/hooks for the session;
                               ignored with a warning when --agent codex)
@@ -150,7 +174,9 @@ Examples:
   worktree new "Add user authentication"
   worktree new "Add user authentication" "Help me implement user auth with JWT tokens"
   worktree new --model opus "Refactor parser core"
+  worktree new --model opus --effort max "Refactor parser core"
   worktree new --agent codex "Port the CLI to Rust"
+  worktree new --agent codex --effort high "Port the CLI to Rust"
   worktree new --settings ~/.config/agent-worktree/hooks.json "Add caching layer"
   worktree destroy add-user-authentication
   worktree open add-user-authentication
@@ -176,10 +202,24 @@ resolve_agent() {
   printf '%s' "$agent"
 }
 
+# Validate an effort level for the given agent. claude and codex accept
+# overlapping but distinct sets, so the check is agent-specific. Empty is a
+# no-op (let the agent's own default stand).
+resolve_effort() {
+  local effort="$1" agent="$2" valid
+  [[ -z "$effort" ]] && return 0
+  case "$agent" in
+  claude) valid="low medium high xhigh max" ;;
+  codex) valid="none minimal low medium high xhigh" ;;
+  esac
+  [[ " $valid " == *" $effort "* ]] ||
+    die "Invalid --effort '$effort' for $agent (expected one of: $valid)"
+}
+
 # Builds the shell command that launches an agent in a tmux pane.
-# Args: agent, mode (new|resume), name, model, prompt, settings
+# Args: agent, mode (new|resume), name, model, prompt, settings, effort
 agent_command() {
-  local agent="$1" mode="$2" name="$3" model="$4" prompt="${5:-}" settings="${6:-}"
+  local agent="$1" mode="$2" name="$3" model="$4" prompt="${5:-}" settings="${6:-}" effort="${7:-}"
   local cmd
   case "$agent" in
   claude)
@@ -189,11 +229,13 @@ agent_command() {
       printf -v cmd 'claude -n %q' "$name"
     fi
     [[ -n "$model" ]] && printf -v cmd '%s --model %q' "$cmd" "$model"
+    [[ -n "$effort" ]] && printf -v cmd '%s --effort %q' "$cmd" "$effort"
     [[ -n "$settings" ]] && printf -v cmd '%s --settings %q' "$cmd" "$settings"
     ;;
   codex)
     cmd='codex'
     [[ -n "$model" ]] && printf -v cmd '%s --model %q' "$cmd" "$model"
+    [[ -n "$effort" ]] && printf -v cmd '%s -c %q' "$cmd" "model_reasoning_effort=\"$effort\""
     [[ -n "$settings" ]] && echo "Warning: --settings is claude-only; ignoring for codex agent" >&2
     # codex has no named sessions; resume picks up the most recent one.
     [[ "$mode" == resume ]] && cmd="$cmd resume --last"
@@ -251,6 +293,7 @@ create_worktree() {
   local model="${3:-}"
   local agent="${4:-claude}"
   local settings="${5:-}"
+  local effort="${6:-}"
 
   if [[ ! -d "$WORKTREES_DIR" ]]; then
     die "Worktrees directory does not exist in current directory: $WORKTREES_DIR"
@@ -280,7 +323,7 @@ create_worktree() {
   [[ "$agent" == claude ]] && claude_trust_dir "$worktree_path"
 
   launch_in_pane "$worktree_path" "$branch_name" \
-    "$(agent_command "$agent" new "$branch_name" "$model" "$prompt" "$settings")"
+    "$(agent_command "$agent" new "$branch_name" "$model" "$prompt" "$settings" "$effort")"
 }
 
 destroy_worktree() {
@@ -307,6 +350,7 @@ open_worktree() {
   local model="${2:-}"
   local agent="${3:-claude}"
   local settings="${4:-}"
+  local effort="${5:-}"
   local worktree_path="$WORKTREES_DIR/$directory_name"
 
   if [[ ! -d "$worktree_path" ]]; then
@@ -316,7 +360,7 @@ open_worktree() {
   [[ "$agent" == claude ]] && claude_trust_dir "$worktree_path"
 
   launch_in_pane "$worktree_path" "$directory_name" \
-    "$(agent_command "$agent" resume "$directory_name" "$model" "" "$settings")"
+    "$(agent_command "$agent" resume "$directory_name" "$model" "" "$settings" "$effort")"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

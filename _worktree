@@ -21,6 +21,7 @@ _worktree() {
           _arguments \
             '--agent[Coding agent to launch]:agent:(claude codex)' \
             '--model[Model to pass through to the agent]:model:' \
+            '--effort[Reasoning/effort level for the session]:effort:(none minimal low medium high xhigh max)' \
             '--settings[Settings file to pass through to the agent (claude only)]:settings file:_files' \
             '*:feature description:'
           ;;
@@ -28,6 +29,7 @@ _worktree() {
           _arguments \
             '--agent[Coding agent to launch]:agent:(claude codex)' \
             '--model[Model to pass through to the agent]:model:' \
+            '--effort[Reasoning/effort level for the session]:effort:(none minimal low medium high xhigh max)' \
             '--settings[Settings file to pass through to the agent (claude only)]:settings file:_files' \
             '*:worktree directory:_worktree_directories'
           ;;
