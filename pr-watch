@@ -42,9 +42,14 @@ command -v gh >/dev/null 2>&1 || { echo "pr-watch: gh not on PATH" >&2; exit 2; 
 # Composite change signal: state + review decision + comment/review counts.
 # Any delta in this tuple (other than a terminal MERGED/CLOSED) means the human
 # touched the PR. `gh pr view` resolves either a number or a branch name.
+#
+# PENDING reviews are excluded: a review the human is still drafting (and its
+# in-flight inline comments) increments .reviews while unsubmitted, which would
+# wake the model on a half-written review. Only count reviews once submitted
+# (state != PENDING) so the signal fires when the human actually sends them.
 signal() {
   gh pr view "$pr" --json state,reviewDecision,comments,reviews \
-    -q '[.state,(.reviewDecision // ""),(.comments|length),(.reviews|length)]|@tsv' 2>/dev/null
+    -q '[.state,(.reviewDecision // ""),(.comments|length),([.reviews[]|select(.state!="PENDING")]|length)]|@tsv' 2>/dev/null
 }
 
 teardown_on_merge() {
