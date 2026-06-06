@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# pr-watch — event-driven PR babysitter for worktree sessions.
+#
+# Blocks (cheap `gh` polling in the shell — zero model tokens) until the PR does
+# something the session must react to, then exits so the harness re-invokes the
+# model exactly once. Launched as a run_in_background Bash task by the worktree
+# review-gate after a PR is opened.
+#
+# Usage: pr-watch [--pane PANE] [--interval SECONDS] <pr-number|branch>
+#
+# Outcomes (stdout, last line is the verdict):
+#   REVIEW_ACTIVITY   new comment / review / changed review-decision -> model handles it
+#   CLOSED            PR closed without merging                       -> model flags it
+#   (merged)          if --pane given, the pane is killed here and nothing prints
+#                     (session+shell+pane vanish); without --pane, prints MERGED
+#
+# Self-teardown: on merge, `tmux kill-pane -t <pane>` closes claude + the shell +
+# the tmux pane in one shot — the session disposes of itself. Worktree/branch
+# cleanup is intentionally NOT done here (left to the user's weekly cron).
+
+set -uo pipefail
+
+pane=""
+interval=180
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pane)      pane="${2:-}"; shift 2 ;;
+    --pane=*)    pane="${1#--pane=}"; shift ;;
+    --interval)  interval="${2:-180}"; shift 2 ;;
+    --interval=*) interval="${1#--interval=}"; shift ;;
+    -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
+    --)          shift; break ;;
+    -*)          echo "pr-watch: unknown option $1" >&2; exit 2 ;;
+    *)           break ;;
+  esac
+done
+
+pr="${1:-}"
+[[ -n "$pr" ]] || { echo "pr-watch: missing <pr-number|branch>" >&2; exit 2; }
+command -v gh >/dev/null 2>&1 || { echo "pr-watch: gh not on PATH" >&2; exit 2; }
+
+# Composite change signal: state + review decision + comment/review counts.
+# Any delta in this tuple (other than a terminal MERGED/CLOSED) means the human
+# touched the PR. `gh pr view` resolves either a number or a branch name.
+signal() {
+  gh pr view "$pr" --json state,reviewDecision,comments,reviews \
+    -q '[.state,(.reviewDecision // ""),(.comments|length),(.reviews|length)]|@tsv' 2>/dev/null
+}
+
+teardown_on_merge() {
+  if [[ -n "$pane" ]] && command -v tmux >/dev/null 2>&1; then
+    tmux kill-pane -t "$pane" 2>/dev/null && exit 0   # pane death kills this process too
+  fi
+  echo MERGED   # no pane to kill (or tmux gone) -> let the model handle teardown
+  exit 0
+}
+
+base="$(signal)"
+while [[ -z "$base" ]]; do            # tolerate a flaky first read
+  sleep "$interval"; base="$(signal)"
+done
+
+state="${base%%$'\t'*}"
+[[ "$state" == MERGED ]] && teardown_on_merge
+[[ "$state" == CLOSED ]] && { echo CLOSED; exit 0; }
+
+while sleep "$interval"; do
+  cur="$(signal)" || continue
+  [[ -z "$cur" ]] && continue          # transient gh/network failure -> keep waiting
+  state="${cur%%$'\t'*}"
+  [[ "$state" == MERGED ]] && teardown_on_merge
+  [[ "$state" == CLOSED ]] && { echo CLOSED; exit 0; }
+  if [[ "$cur" != "$base" ]]; then echo REVIEW_ACTIVITY; exit 0; fi
+done
